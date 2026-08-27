@@ -6,6 +6,10 @@ no separate window, no account. Type a task, hit Enter, check it off.
 
 ![Simple Task screenshot](preview.png)
 
+Requires `python3`, used to read the saved task file safely (see
+[Security](#security) below). It's part of virtually every Arch/Omarchy
+install already, so this is rarely something you need to think about.
+
 ## Install
 
 ```bash
@@ -50,6 +54,19 @@ Colors are pulled straight from the active Omarchy theme (`Color.menu.*` for
 the card, `Color.popups.border` for the border, the same accent color
 Hyprland uses for active window borders), so it re-themes itself automatically
 whenever you switch themes with `omarchy theme set`.
+
+## Security
+
+Plugins run unsandboxed inside the shared `omarchy-shell` process, so this
+one avoids trusting the saved task file (`~/.local/state/omarchy/tasks.json`)
+any more than it has to. Reading it goes through `read-tasks.py`, which
+opens the path with `O_NOFOLLOW | O_NONBLOCK` and checks the resulting file
+descriptor (not the path, to dodge a check-then-open race) is a regular
+file before reading a capped number of bytes. That means a symlink planted
+at that path can't make the plugin read something else, a FIFO can't hang
+the shell waiting on `open()`, and an oversized file can't be parsed into
+unbounded memory. Writes go through Quickshell's `FileView.setText()` with
+`atomicWrites` on, so a reader never sees a half-written file either.
 
 ## Uninstall
 
