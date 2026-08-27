@@ -18,16 +18,20 @@ and registers it in `~/.config/omarchy/shell.json`.
 ## Bind a key to it
 
 Simple Task is an overlay, summoned like Omarchy's built-in Clipboard manager
-or Reminders. Add a binding in `~/.config/hypr/bindings.lua`:
+or Reminders. It doesn't ship with a keybinding of its own, so add one in
+`~/.config/hypr/bindings.lua`. The suggested default is **SUPER + SHIFT + T**:
 
 ```lua
 o.bind("SUPER + SHIFT + T", "Simple Task", "omarchy-shell shell toggle pedro.simple-task")
 ```
 
-Pick whatever key combo is free on your setup, check with
-`omarchy menu keybindings --print` first.
+If that combo is already taken on your setup, check
+`omarchy menu keybindings --print` and pick a free one instead.
 
 ## Using it
+
+Open it with your keybind (**SUPER + SHIFT + T** if you used the suggested
+default above), then:
 
 - Type anything and press **Enter** to add it as a task
 - **↑ / ↓** to move the selection
