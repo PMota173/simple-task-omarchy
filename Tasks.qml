@@ -17,6 +17,13 @@ Item {
   property bool cursorActive: false
 
   property string tasksPath: Quickshell.env("HOME") + "/.local/state/omarchy/tasks.json"
+  // Reading tasksPath goes through read-tasks.py rather than letting
+  // FileView touch it directly: that path is predictable, and a symlink or
+  // FIFO planted there could make the shared shell process follow an
+  // arbitrary file, block on open(), or read an unbounded amount of data.
+  // The script opens it with O_NOFOLLOW|O_NONBLOCK and checks the resulting
+  // descriptor is a regular file before reading a capped number of bytes.
+  property string readScript: String(Qt.resolvedUrl("read-tasks.py")).replace(/^file:\/\//, "")
 
   // Background/text share the [menu] surface tokens (same as Clipboard);
   // the border uses [popups] instead, which defaults to the theme's accent
@@ -173,16 +180,26 @@ Item {
     referenceItem: card
   }
 
+  // Write-only: saveTasks() calls setText(), which writes through a temp
+  // file and rename (atomicWrites), so a reader never sees a half-written
+  // file. Reading is handled separately below, through readProc.
   FileView {
     id: tasksFile
     path: root.tasksPath
-    watchChanges: true
     atomicWrites: true
     printErrors: false
-    onLoaded: root.loadTasks(text())
-    onLoadFailed: root.loadTasks("[]")
-    onFileChanged: reload()
   }
+
+  Process {
+    id: readProc
+    command: ["python3", root.readScript, root.tasksPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadTasks(text)
+    }
+  }
+
+  Component.onCompleted: readProc.running = true
 
   PanelWindow {
     id: panel
