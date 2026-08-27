@@ -20,6 +20,8 @@ import sys
 MAX_BYTES = 2 * 1024 * 1024
 READ_CHUNK = 65536
 
+EMPTY = b"[]"
+
 
 def read_bounded(fd, max_bytes):
     chunks = []
@@ -34,13 +36,7 @@ def read_bounded(fd, max_bytes):
         chunks.append(chunk)
 
 
-def main():
-    if len(sys.argv) != 2:
-        sys.stdout.write("[]")
-        return
-
-    path = sys.argv[1]
-
+def read_task_file(path):
     try:
         # O_NOFOLLOW: refuse atomically if the final path component is a
         # symlink, instead of following it.
@@ -51,8 +47,7 @@ def main():
     except OSError:
         # Missing file, symlink, or anything else that can't be opened
         # this way: treat it as "no saved tasks yet".
-        sys.stdout.write("[]")
-        return
+        return EMPTY
 
     try:
         # Check the type of the file descriptor that's actually open, not
@@ -60,17 +55,19 @@ def main():
         # between the check and the open).
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            sys.stdout.write("[]")
-            return
+            return EMPTY
 
         data = read_bounded(fd, MAX_BYTES)
-        if data is None:
-            sys.stdout.write("[]")
-            return
-
-        sys.stdout.buffer.write(data)
+        return data if data is not None else EMPTY
     finally:
         os.close(fd)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.stdout.buffer.write(EMPTY)
+        return
+    sys.stdout.buffer.write(read_task_file(sys.argv[1]))
 
 
 if __name__ == "__main__":

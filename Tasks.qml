@@ -23,7 +23,11 @@ Item {
   // arbitrary file, block on open(), or read an unbounded amount of data.
   // The script opens it with O_NOFOLLOW|O_NONBLOCK and checks the resulting
   // descriptor is a regular file before reading a capped number of bytes.
-  property string readScript: String(Qt.resolvedUrl("read-tasks.py")).replace(/^file:\/\//, "")
+  // Qt.resolvedUrl percent-encodes anything outside plain ASCII (spaces,
+  // accented characters), which a real path never is, so decode it back
+  // before handing it to Process — otherwise an install path like
+  // "/home/josé mota/..." breaks the read entirely.
+  property string readScript: decodeURIComponent(String(Qt.resolvedUrl("read-tasks.py")).replace(/^file:\/\//, ""))
 
   // Background/text share the [menu] surface tokens (same as Clipboard);
   // the border uses [popups] instead, which defaults to the theme's accent
@@ -180,14 +184,19 @@ Item {
     referenceItem: card
   }
 
-  // Write-only: saveTasks() calls setText(), which writes through a temp
-  // file and rename (atomicWrites), so a reader never sees a half-written
-  // file. Reading is handled separately below, through readProc.
+  // saveTasks() calls setText(), which writes through a temp file and
+  // rename (atomicWrites), so a reader never sees a half-written file.
+  // Actual reading never touches text()/reload() here (see readProc
+  // below) — watchChanges only re-triggers the safe read below when the
+  // file changes on disk, e.g. if the user edits or deletes it by hand
+  // while the shell is running.
   FileView {
     id: tasksFile
     path: root.tasksPath
+    watchChanges: true
     atomicWrites: true
     printErrors: false
+    onFileChanged: readProc.running = true
   }
 
   Process {
@@ -196,6 +205,17 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.loadTasks(text)
+    }
+    // Fires if read-tasks.py starts but exits non-zero. Not user-facing —
+    // the task list just reads as empty in that case — but logging means
+    // it shows up in `qs log`/journalctl instead of vanishing without a
+    // trace. Quickshell's Process doesn't expose a QML signal for the
+    // process failing to start at all (e.g. python3 missing from PATH
+    // entirely), so that specific failure stays silent; it's the same gap
+    // Omarchy's own first-party plugins leave open for their Process
+    // components.
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) console.warn("Simple Task: read-tasks.py exited with code " + exitCode)
     }
   }
 
