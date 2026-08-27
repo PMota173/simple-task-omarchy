@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "pedro.simple-task",
+  "name": "Simple Task",
+  "version": "1.0.0",
+  "author": "pedro",
+  "license": "MIT",
+  "description": "A simple, theme-aware task list overlay. Type to add, Enter to check off, persisted locally.",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Tasks.qml"
+  }
+}
