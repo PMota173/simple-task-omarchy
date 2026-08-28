@@ -17,17 +17,30 @@ Item {
   property bool cursorActive: false
 
   property string tasksPath: Quickshell.env("HOME") + "/.local/state/omarchy/tasks.json"
-  // Reading tasksPath goes through read-tasks.py rather than letting
-  // FileView touch it directly: that path is predictable, and a symlink or
-  // FIFO planted there could make the shared shell process follow an
-  // arbitrary file, block on open(), or read an unbounded amount of data.
-  // The script opens it with O_NOFOLLOW|O_NONBLOCK and checks the resulting
-  // descriptor is a regular file before reading a capped number of bytes.
+  // tasksPath is never opened from inside the shell process. Both
+  // directions go through helper scripts (read-tasks.py / write-tasks.py)
+  // because the path is predictable: a symlink or FIFO planted there could
+  // otherwise redirect a read, block the shell on open(), read unbounded
+  // data, or redirect a save into another file the user owns. See the
+  // Security section of the README.
+  //
   // Qt.resolvedUrl percent-encodes anything outside plain ASCII (spaces,
   // accented characters), which a real path never is, so decode it back
   // before handing it to Process — otherwise an install path like
-  // "/home/josé mota/..." breaks the read entirely.
-  property string readScript: decodeURIComponent(String(Qt.resolvedUrl("read-tasks.py")).replace(/^file:\/\//, ""))
+  // "/home/josé mota/..." breaks the helpers entirely.
+  function scriptPath(name) {
+    return decodeURIComponent(String(Qt.resolvedUrl(name)).replace(/^file:\/\//, ""))
+  }
+
+  property string readScript: root.scriptPath("read-tasks.py")
+  property string writeScript: root.scriptPath("write-tasks.py")
+
+  // Serializes saves. A save is in flight while writeProc runs; another
+  // edit during that window sets saveQueued so the newest state is written
+  // once the current run finishes, instead of racing it.
+  property string pendingSave: ""
+  property bool saveQueued: false
+  readonly property bool savePending: writeProc.running || root.saveQueued
 
   // Background/text share the [menu] surface tokens (same as Clipboard);
   // the border uses [popups] instead, which defaults to the theme's accent
@@ -58,6 +71,12 @@ Item {
     root.cursorActive = false
     root.disarmPointer()
     root.rebuildDisplay()
+    // Pick up anything that changed on disk since the last time the overlay
+    // was up (the README documents editing/deleting the file by hand), so
+    // the next edit is applied on top of current state rather than
+    // overwriting it with what was in memory. Skipped mid-save, where the
+    // in-memory copy is by definition the newer one.
+    if (!root.savePending) readProc.running = true
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -72,12 +91,29 @@ Item {
   }
 
   function loadTasks(raw) {
+    // A read that lands while an edit is waiting to be written would
+    // replace newer in-memory state with the older on-disk copy.
+    if (root.savePending) return
     root.tasks = TasksModel.parseTasks(raw)
     if (root.opened) root.rebuildDisplay()
   }
 
   function saveTasks() {
-    tasksFile.setText(TasksModel.serializeTasks(root.tasks))
+    root.pendingSave = TasksModel.serializeTasks(root.tasks)
+    if (writeProc.running) {
+      root.saveQueued = true
+      return
+    }
+    root.startSave()
+  }
+
+  function startSave() {
+    // stdinEnabled has to be turned back on before every run: the previous
+    // run switched it off to signal end-of-document, and starting again
+    // without it gives the helper no stdin pipe at all, leaving it blocked
+    // on a descriptor that never delivers EOF.
+    writeProc.stdinEnabled = true
+    writeProc.running = true
   }
 
   function rebuildDisplay() {
@@ -184,38 +220,47 @@ Item {
     referenceItem: card
   }
 
-  // saveTasks() calls setText(), which writes through a temp file and
-  // rename (atomicWrites), so a reader never sees a half-written file.
-  // Actual reading never touches text()/reload() here (see readProc
-  // below) — watchChanges only re-triggers the safe read below when the
-  // file changes on disk, e.g. if the user edits or deletes it by hand
-  // while the shell is running.
-  FileView {
-    id: tasksFile
-    path: root.tasksPath
-    watchChanges: true
-    atomicWrites: true
-    printErrors: false
-    onFileChanged: readProc.running = true
-  }
-
+  // The state file is never opened from inside the shell process. Both
+  // directions go through helper processes that apply O_NOFOLLOW and the
+  // caps in tasklimits.py, so a symlink or FIFO planted at this
+  // predictable path can neither redirect a read, block the shell, nor
+  // redirect a save into another file the user owns.
+  //
+  // Neither handler is user-facing (a failed read just shows an empty
+  // list, a failed save leaves the previous file intact), but logging puts
+  // them in `qs log`/journalctl instead of failing silently. Quickshell's
+  // Process exposes no QML signal for a process failing to *start* at all
+  // (python3 missing from PATH entirely), so that one case stays quiet.
   Process {
     id: readProc
-    command: ["python3", root.readScript, root.tasksPath]
+    command: ["python3", "-B", root.readScript, root.tasksPath]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.loadTasks(text)
     }
-    // Fires if read-tasks.py starts but exits non-zero. Not user-facing —
-    // the task list just reads as empty in that case — but logging means
-    // it shows up in `qs log`/journalctl instead of vanishing without a
-    // trace. Quickshell's Process doesn't expose a QML signal for the
-    // process failing to start at all (e.g. python3 missing from PATH
-    // entirely), so that specific failure stays silent; it's the same gap
-    // Omarchy's own first-party plugins leave open for their Process
-    // components.
     onExited: function(exitCode, exitStatus) {
       if (exitCode !== 0) console.warn("Simple Task: read-tasks.py exited with code " + exitCode)
+    }
+  }
+
+  Process {
+    id: writeProc
+    command: ["python3", "-B", root.writeScript, root.tasksPath]
+    stdinEnabled: true
+    onStarted: {
+      writeProc.write(root.pendingSave)
+      // Closing stdin is what tells the helper the document is complete.
+      writeProc.stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode !== 0) console.warn("Simple Task: write-tasks.py exited with code " + exitCode)
+      if (root.saveQueued) {
+        root.saveQueued = false
+        // Deferred: `running` is still true while this handler runs, so
+        // starting from here would be a no-op and the queued save would
+        // never be written.
+        Qt.callLater(root.startSave)
+      }
     }
   }
 
@@ -340,7 +385,11 @@ Item {
           Text {
             id: countText
             anchors.verticalCenter: parent.verticalCenter
-            text: TasksModel.pendingCount(root.tasks) + " pending"
+            // Adding is refused at the cap, so say so rather than looking
+            // like keystrokes are being dropped.
+            text: TasksModel.atTaskLimit(root.tasks)
+              ? "list full"
+              : TasksModel.pendingCount(root.tasks) + " pending"
             color: root.foreground
             opacity: 0.58
             font.family: root.fontFamily

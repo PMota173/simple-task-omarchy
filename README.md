@@ -58,15 +58,30 @@ whenever you switch themes with `omarchy theme set`.
 ## Security
 
 Plugins run unsandboxed inside the shared `omarchy-shell` process, so this
-one avoids trusting the saved task file (`~/.local/state/omarchy/tasks.json`)
-any more than it has to. Reading it goes through `read-tasks.py`, which
-opens the path with `O_NOFOLLOW | O_NONBLOCK` and checks the resulting file
-descriptor (not the path, to dodge a check-then-open race) is a regular
-file before reading a capped number of bytes. That means a symlink planted
-at that path can't make the plugin read something else, a FIFO can't hang
-the shell waiting on `open()`, and an oversized file can't be parsed into
-unbounded memory. Writes go through Quickshell's `FileView.setText()` with
-`atomicWrites` on, so a reader never sees a half-written file either.
+one never opens the saved task file (`~/.local/state/omarchy/tasks.json`)
+from inside that process. Both directions go through small helper
+processes, because the path is predictable and another process running as
+you could plant something hostile there.
+
+**Reading** (`read-tasks.py`) opens the path with `O_NOFOLLOW | O_NONBLOCK`
+and checks the resulting file descriptor (not the path, to dodge a
+check-then-open race) is a regular file before reading a capped number of
+bytes. A symlink can't redirect the read, a FIFO can't hang the shell on
+`open()`, and an oversized file can't be parsed into unbounded memory.
+
+**Writing** (`write-tasks.py`) never opens the destination either. It
+creates a fresh file beside it with `O_CREAT | O_EXCL | O_NOFOLLOW`, fsyncs
+it, and `rename()`s it over the destination. `rename()` follows no symlink,
+so a link planted at the path is replaced rather than written through, and
+the file it pointed at is left alone. Atomic writes on their own would not
+give you this.
+
+**Bounds** (`tasklimits.py`, mirrored in `TasksModel.js`) cap the task count
+and per-field lengths, not just the raw byte size. A file that stays under
+the byte ceiling can still hold tens of thousands of tiny valid task
+objects, which would otherwise become that many retained objects and list
+rows inside the shell process. The same caps apply when loading, when
+adding tasks in-app, and when saving.
 
 ## Uninstall
 
